@@ -80,3 +80,51 @@ def normalize_news(raw_json) -> pd.DataFrame:
 
 def normalize_generic(raw_json) -> pd.DataFrame:
     return pd.DataFrame(raw_json)
+def normalize_insti(raw_json) -> pd.DataFrame:
+    """
+    將 /fund/T86 轉成欄位：
+    code, name, date, net_foreign, net_invest, net_dealer, net_total
+    """
+    fields = raw_json.get("fields") or []
+    rows = raw_json.get("data") or []
+    if not fields or not rows:
+        return pd.DataFrame(columns=["code","name","date","net_foreign","net_invest","net_dealer","net_total"])
+
+    df = pd.DataFrame(rows, columns=fields)
+
+    # 欄位對應（中文抬頭常見值）
+    rename_map = {}
+    for col in df.columns:
+        if col in ["證券代號", "Code"]:
+            rename_map[col] = "code"
+        elif col in ["證券名稱", "Name"]:
+            rename_map[col] = "name"
+        elif "外陸資買賣超股數" in col:
+            rename_map[col] = "net_foreign"
+        elif "投信買賣超股數" in col:
+            rename_map[col] = "net_invest"
+    df.rename(columns=rename_map, inplace=True)
+
+    def _to_int(x):
+        try:
+            s = str(x).replace(",", "").strip()
+            if s in ("", "—"): return 0
+            return int(float(s))
+        except Exception:
+            return 0
+
+    # 自營商欄位可能分拆（自行/避險/合計），統一相加
+    dealer_cols = [c for c in df.columns if c.startswith("自營商買賣超股數")]
+    df["net_dealer"] = df[dealer_cols].applymap(_to_int).sum(axis=1) if dealer_cols else 0
+
+    df["net_foreign"] = df["net_foreign"].map(_to_int) if "net_foreign" in df else 0
+    df["net_invest"]  = df["net_invest"].map(_to_int)  if "net_invest"  in df else 0
+    df["net_total"]   = df["net_foreign"] + df["net_invest"] + df["net_dealer"]
+
+    raw_date = (raw_json.get("date") or "").replace("/", "-")[:10]  # YYYY-MM-DD
+    df["date"] = raw_date
+
+    out_cols = ["code","name","date","net_foreign","net_invest","net_dealer","net_total"]
+    for c in out_cols:
+        if c not in df.columns: df[c] = None
+    return df[out_cols]
