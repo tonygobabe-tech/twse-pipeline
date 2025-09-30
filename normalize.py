@@ -172,85 +172,59 @@ def normalize_taiex(raw_json) -> pd.DataFrame:
     df["market"] = "TAIEX"
     return df[["market","date","open","high","low","close","volume","turnover"]]
 
-def normalize_otc(raw_obj) -> pd.DataFrame:
-    """
-    DEBUG 版：把 OTC 原始欄位印到 log，並且彈性對應欄位。
-    就算抓不到任何欄位，也會回傳合法 schema，避免整體 pipeline 失敗。
-    """
+def normalize_otc(raw_obj):
     import pandas as pd
-    import json
-
-    # ---- 1) 把原始結構/欄位印出來（到 GitHub Actions 的 log）----
-    print("DEBUG[OTC] raw type:", type(raw_obj))
-    if isinstance(raw_obj, dict):
-        print("DEBUG[OTC] raw keys:", list(raw_obj.keys()))
-        data = (
-            raw_obj.get("data")
-            or raw_obj.get("records")
-            or raw_obj.get("items")
-            or raw_obj.get("Data")
-            or raw_obj.get("result")
-            or raw_obj.get("payload")
-        )
+    
+    print("DEBUG[OTC] raw_obj:", type(raw_obj), len(raw_obj))
+    
+    # Case 1: 如果 raw_obj 直接是 dict 包含 'data' 欄位
+    if isinstance(raw_obj, dict) and "data" in raw_obj:
+        rows = raw_obj.get("data", [])
+        print("DEBUG[OTC] dict with 'data', rows:", len(rows))
+        df = pd.DataFrame(rows)
+    
+    # Case 2: 如果 raw_obj 是 list（常見情況）
+    elif isinstance(raw_obj, list):
+        print("DEBUG[OTC] list detected, rows:", len(raw_obj))
+        df = pd.DataFrame(raw_obj)
+    
     else:
-        data = raw_obj  # 有些端點直接就是 list
+        print("DEBUG[OTC] unexpected structure:", raw_obj)
+        return pd.DataFrame()  # 空表回傳
 
-    if data is None:
-        # 盡量不要把整包印出來，避免太長；只截前 500 字
-        print("DEBUG[OTC] no obvious data key; raw head:", str(raw_obj)[:500])
-        data = []
+    print("DEBUG[OTC] columns:", df.columns.tolist())
+    print("DEBUG[OTC] sample rows:", df.head(3).to_dict(orient="records"))
 
-    df = pd.DataFrame(data)
-    print("DEBUG[OTC] columns:", list(df.columns))
-    try:
-        print("DEBUG[OTC] sample rows:", df.head(2).to_dict(orient="records"))
-    except Exception:
-        pass
+    # 如果 df 真的沒有東西，直接回空
+    if df.empty:
+        print("DEBUG[OTC] df is empty, return blank DataFrame")
+        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
 
-    # ---- 2) 嘗試把各種常見欄位名「對應」成標準欄位 ----
-    candidates = {
-        "date":     ["date", "Date", "日期", "交易日期"],
-        "open":     ["open", "Open", "開盤", "開盤指數", "開盤價"],
-        "high":     ["high", "High", "最高", "最高指數", "最高價"],
-        "low":      ["low", "Low", "最低", "最低指數", "最低價"],
-        "close":    ["close", "Close", "收盤", "收盤指數", "收盤價"],
-        "volume":   ["volume", "Volume", "成交股數", "成交量"],
-        "turnover": ["turnover", "Turnover", "成交金額", "成交值", "成交金額(千元)"],
-    }
+    # 嘗試找日期欄位（有些 API 用 "Date" 或 "date"）
+    date_col = None
+    for cand in ["date", "Date", "日期", "time"]:
+        if cand in df.columns:
+            date_col = cand
+            break
+    if not date_col:
+        print("DEBUG[OTC] no date column found!")
+        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
 
-    rename_map = {}
-    for std, opts in candidates.items():
-        for c in opts:
-            if c in df.columns:
-                rename_map[c] = std
-                break
-    if rename_map:
-        df = df.rename(columns=rename_map)
+    # 統一欄位
+    df = df.rename(columns={
+        date_col: "date",
+        "開盤價": "open",
+        "最高價": "high",
+        "最低價": "low",
+        "收盤價": "close",
+        "成交股數": "volume",
+        "成交金額": "turnover"
+    })
 
-    # ---- 3) 數字/日期標準化（能轉就轉，轉不了留空）----
-    def _num(x):
-        try:
-            s = str(x).replace(",", "").strip()
-            if s == "" or s == "—":
-                return None
-            return float(s)
-        except Exception:
-            return None
+    keep_cols = ["date","open","high","low","close","volume","turnover"]
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    df = df[keep_cols].dropna(how="all")
 
-    for c in ["open", "high", "low", "close", "volume", "turnover"]:
-        if c in df.columns:
-            df[c] = df[c].map(_num)
+    print("DEBUG[OTC] normalized rows:", len(df))
+    return df
 
-    if "date" in df.columns:
-        df["date"] = df["date"].astype(str).str.replace("/", "-").str[:10]
-
-    # ---- 4) 固定欄位輸出，缺的補 None；並標 market=OTC ----
-    df["market"] = "OTC"
-    cols = ["market", "date", "open", "high", "low", "close", "volume", "turnover"]
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-
-    out = df[cols]
-    print("DEBUG[OTC] normalized rows:", len(out))
-    return out
