@@ -1,14 +1,22 @@
+# main.py — 加入「大盤指數 TAIEX / OTC」，並保留 insti（三大法人）
+# 變更標記：# NEW / # CHG
+
 import argparse, os, yaml, sys, json
 from utils import HttpClient
 from fetcher import fetch as fetch_openapi
 from normalize import (
-    normalize_daily, normalize_basics, normalize_news, normalize_generic, normalize_insti
+    normalize_daily, normalize_basics, normalize_news, normalize_generic,
+    normalize_insti,
+    normalize_taiex,            # NEW
+    normalize_otc               # NEW
 )
 from store import save, save_csv
 from insti import fetch_insti
+from index_fetch import fetch_taiex, fetch_otc   # NEW
 import pandas as pd
 
-DATASETS = ["daily","monthly","yearly","basics","news","holders","insti"]
+# CHG: 擴充資料集清單
+DATASETS = ["daily","monthly","yearly","basics","news","holders","insti","taiex","otc"]  # CHG
 
 def load_config(path="config.yaml"):
     with open(path, "r", encoding="utf-8") as f:
@@ -19,29 +27,35 @@ def run_fetch(datasets, cfg):
     out_root = cfg.get("output_dir","data")
     raw_paths = {}
     for ds in datasets:
+        # NEW: 依資料集呼叫不同抓取器
         if ds == "insti":
             raw_path, the_date = fetch_insti(client, out_root)
-            print(f"[OK] fetched insti({the_date}) -> {raw_path}")
-            raw_paths[ds] = raw_path
+        elif ds == "taiex":   # NEW
+            raw_path, the_date = fetch_taiex(client, out_root)
+        elif ds == "otc":     # NEW
+            raw_path, the_date = fetch_otc(client, out_root)
         else:
             raw_path = fetch_openapi(ds, client, out_root)
-            print(f"[OK] fetched {ds} -> {raw_path}")
-            raw_paths[ds] = raw_path
+
+        print(f"[OK] fetched {ds} -> {raw_path}")
+        raw_paths[ds] = raw_path
     return raw_paths
 
 def run_normalize(datasets, cfg):
     out_root = cfg.get("output_dir","data")
     storage = cfg.get("storage","csv")
     for ds in datasets:
-        raw_path = os.path.join(out_root, "raw", f"{ds}.json") if ds != "insti" else None
-        if ds == "insti":
-            # insti 檔名帶日期：抓最新一個
+        # CHG: insti/taiex/otc 的 raw 檔名都帶日期，要從 raw 資料夾找「最新一個」
+        if ds in ["insti","taiex","otc"]:   # CHG
             raw_dir = os.path.join(out_root, "raw")
-            candidates = sorted([p for p in os.listdir(raw_dir) if p.startswith("insti_")], reverse=True)
+            prefix = {"insti":"insti_", "taiex":"taiex_", "otc":"otc_"}[ds]
+            candidates = sorted([p for p in os.listdir(raw_dir) if p.startswith(prefix)], reverse=True)
             if not candidates:
-                print("[WARN] no raw insti file found, skip")
+                print(f"[WARN] no raw {ds} file found, skip")
                 continue
             raw_path = os.path.join(raw_dir, candidates[0])
+        else:
+            raw_path = os.path.join(out_root, "raw", f"{ds}.json")
 
         if not os.path.exists(raw_path):
             print(f"[WARN] raw not found: {raw_path}, skip")
@@ -50,13 +64,18 @@ def run_normalize(datasets, cfg):
         with open(raw_path, "r", encoding="utf-8") as f:
             raw_obj = json.load(f)
 
-        if ds=="daily":
+        # NEW: 指數的 normalize
+        if ds == "taiex":
+            df = normalize_taiex(raw_obj)
+        elif ds == "otc":
+            df = normalize_otc(raw_obj)
+        elif ds == "daily":
             df = normalize_daily(raw_obj)
-        elif ds=="basics":
+        elif ds == "basics":
             df = normalize_basics(raw_obj)
-        elif ds=="news":
+        elif ds == "news":
             df = normalize_news(raw_obj)
-        elif ds=="insti":
+        elif ds == "insti":
             df = normalize_insti(raw_obj)
         else:
             df = normalize_generic(raw_obj)
@@ -67,9 +86,9 @@ def run_normalize(datasets, cfg):
         else:
             print(f"[OK] normalized {ds} -> saved to SQLite")
 
-        # watchlist 過濾
+        # watchlist 過濾（僅對含 code 欄位的表）
         wl = set([str(x) for x in cfg.get("watchlist", [])])
-        if len(wl)>0 and "code" in df.columns:
+        if len(wl) > 0 and "code" in df.columns:
             wdf = df[df["code"].astype(str).isin(wl)].copy()
             wpath = os.path.join(out_root, "watchlist", f"{ds}.csv")
             save_csv(wdf, wpath)
@@ -80,9 +99,14 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
 
     p_fetch = sub.add_parser("fetch", help="抓取資料集")
-    p_fetch.add_argument("datasets", nargs="*", default=["daily"], help="可多選: daily monthly yearly basics news holders insti")
+    p_fetch.add_argument(
+        "datasets",
+        nargs="*",
+        default=["daily"],
+        help="可多選: daily monthly yearly basics news holders insti taiex otc"  # CHG
+    )
 
-    p_all = sub.add_parser("fetch-all", help="一鍵抓取全部資料集")
+    sub.add_parser("fetch-all", help="一鍵抓取全部資料集")
 
     args = parser.parse_args()
     cfg = load_config()
@@ -102,4 +126,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
