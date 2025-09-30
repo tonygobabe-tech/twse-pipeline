@@ -128,3 +128,69 @@ def normalize_insti(raw_json) -> pd.DataFrame:
     for c in out_cols:
         if c not in df.columns: df[c] = None
     return df[out_cols]
+def normalize_taiex(raw_json) -> pd.DataFrame:
+    """
+    解析 TWSE MI_INDEX 指數表格，輸出：market, date, open, high, low, close, volume, turnover
+    """
+    import pandas as pd
+    # TWSE 回傳多個 tables，找加權指數那張
+    tables = raw_json.get("tables") or []
+    target = None
+    for t in tables:
+        if t.get("title") and ("發行量加權股價指數" in t["title"] or "發行量加權" in t["title"]):
+            target = t
+            break
+    if not target:
+        return pd.DataFrame(columns=["market","date","open","high","low","close","volume","turnover"])
+
+    cols = target.get("fields") or []
+    rows = target.get("data") or []
+    df = pd.DataFrame(rows, columns=cols)
+
+    def _num(x):
+        import re
+        s = str(x).replace(",", "").strip()
+        try:
+            return float(re.sub(r"[^\d\.\-]", "", s)) if s else None
+        except: return None
+
+    # 嘗試常見中文欄位
+    cmap = {}
+    for c in df.columns:
+        if "開盤" in c: cmap[c] = "open"
+        elif "最高" in c: cmap[c] = "high"
+        elif "最低" in c: cmap[c] = "low"
+        elif "收盤" in c or "收市" in c: cmap[c] = "close"
+        elif "成交股數" in c or "成交量" in c: cmap[c] = "volume"
+        elif "成交金額" in c: cmap[c] = "turnover"
+    df = df.rename(columns=cmap)
+    for c in ["open","high","low","close","volume","turnover"]:
+        if c in df: df[c] = df[c].map(_num)
+
+    date = (raw_json.get("reportDate") or raw_json.get("date") or "").replace("/", "-")[:10]
+    df["date"] = date
+    df["market"] = "TAIEX"
+    return df[["market","date","open","high","low","close","volume","turnover"]]
+
+def normalize_otc(raw_json) -> pd.DataFrame:
+    """
+    解析 櫃買指數 OpenAPI，輸出：market, date, open, high, low, close, volume, turnover
+    """
+    import pandas as pd
+    if isinstance(raw_json, dict):
+        rows = raw_json.get("data") or []
+    else:
+        rows = raw_json  # 多數情況直接是一個 list
+    df = pd.DataFrame(rows)
+    # 嘗試欄位對應
+    colmap = {
+        "Date":"date","date":"date",
+        "Open":"open","High":"high","Low":"low","Close":"close",
+        "Volume":"volume","Turnover":"turnover",
+        "開盤指數":"open","最高指數":"high","最低指數":"low","收盤指數":"close",
+        "成交股數":"volume","成交金額":"turnover"
+    }
+    for k,v in colmap.items():
+        if k in df.columns: df.rename(columns={k:v}, inplace=True)
+    df["market"] = "OTC"
+    return df[["market","date","open","high","low","close","volume","turnover"]].dropna(how="all")
