@@ -1,0 +1,20 @@
+name: TWSE Pipeline
+on:
+  schedule:
+    - cron: "5 10 * * *"   # UTC 10:05 = 台北 18:05，每日自動跑
+  workflow_dispatch: {}     # 允許手動觸發
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python main.py fetch daily news
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data
+          path: data
