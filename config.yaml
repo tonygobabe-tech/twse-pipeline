@@ -2,6 +2,6 @@ watchlist:
   - "2330"
   - "0050"
 output_dir: "data"
-storage: "csv"   # csv 或 sqlite（先用 csv 示範）
+storage: "sqlite"   # ← 由 csv 改成 sqlite
 timeout_sec: 20
 retries: 3
