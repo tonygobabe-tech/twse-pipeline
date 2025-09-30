@@ -172,25 +172,85 @@ def normalize_taiex(raw_json) -> pd.DataFrame:
     df["market"] = "TAIEX"
     return df[["market","date","open","high","low","close","volume","turnover"]]
 
-def normalize_otc(raw_json) -> pd.DataFrame:
+def normalize_otc(raw_obj) -> pd.DataFrame:
     """
-    解析 櫃買指數 OpenAPI，輸出：market, date, open, high, low, close, volume, turnover
+    DEBUG 版：把 OTC 原始欄位印到 log，並且彈性對應欄位。
+    就算抓不到任何欄位，也會回傳合法 schema，避免整體 pipeline 失敗。
     """
     import pandas as pd
-    if isinstance(raw_json, dict):
-        rows = raw_json.get("data") or []
+    import json
+
+    # ---- 1) 把原始結構/欄位印出來（到 GitHub Actions 的 log）----
+    print("DEBUG[OTC] raw type:", type(raw_obj))
+    if isinstance(raw_obj, dict):
+        print("DEBUG[OTC] raw keys:", list(raw_obj.keys()))
+        data = (
+            raw_obj.get("data")
+            or raw_obj.get("records")
+            or raw_obj.get("items")
+            or raw_obj.get("Data")
+            or raw_obj.get("result")
+            or raw_obj.get("payload")
+        )
     else:
-        rows = raw_json  # 多數情況直接是一個 list
-    df = pd.DataFrame(rows)
-    # 嘗試欄位對應
-    colmap = {
-        "Date":"date","date":"date",
-        "Open":"open","High":"high","Low":"low","Close":"close",
-        "Volume":"volume","Turnover":"turnover",
-        "開盤指數":"open","最高指數":"high","最低指數":"low","收盤指數":"close",
-        "成交股數":"volume","成交金額":"turnover"
+        data = raw_obj  # 有些端點直接就是 list
+
+    if data is None:
+        # 盡量不要把整包印出來，避免太長；只截前 500 字
+        print("DEBUG[OTC] no obvious data key; raw head:", str(raw_obj)[:500])
+        data = []
+
+    df = pd.DataFrame(data)
+    print("DEBUG[OTC] columns:", list(df.columns))
+    try:
+        print("DEBUG[OTC] sample rows:", df.head(2).to_dict(orient="records"))
+    except Exception:
+        pass
+
+    # ---- 2) 嘗試把各種常見欄位名「對應」成標準欄位 ----
+    candidates = {
+        "date":     ["date", "Date", "日期", "交易日期"],
+        "open":     ["open", "Open", "開盤", "開盤指數", "開盤價"],
+        "high":     ["high", "High", "最高", "最高指數", "最高價"],
+        "low":      ["low", "Low", "最低", "最低指數", "最低價"],
+        "close":    ["close", "Close", "收盤", "收盤指數", "收盤價"],
+        "volume":   ["volume", "Volume", "成交股數", "成交量"],
+        "turnover": ["turnover", "Turnover", "成交金額", "成交值", "成交金額(千元)"],
     }
-    for k,v in colmap.items():
-        if k in df.columns: df.rename(columns={k:v}, inplace=True)
+
+    rename_map = {}
+    for std, opts in candidates.items():
+        for c in opts:
+            if c in df.columns:
+                rename_map[c] = std
+                break
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # ---- 3) 數字/日期標準化（能轉就轉，轉不了留空）----
+    def _num(x):
+        try:
+            s = str(x).replace(",", "").strip()
+            if s == "" or s == "—":
+                return None
+            return float(s)
+        except Exception:
+            return None
+
+    for c in ["open", "high", "low", "close", "volume", "turnover"]:
+        if c in df.columns:
+            df[c] = df[c].map(_num)
+
+    if "date" in df.columns:
+        df["date"] = df["date"].astype(str).str.replace("/", "-").str[:10]
+
+    # ---- 4) 固定欄位輸出，缺的補 None；並標 market=OTC ----
     df["market"] = "OTC"
-    return df[["market","date","open","high","low","close","volume","turnover"]].dropna(how="all")
+    cols = ["market", "date", "open", "high", "low", "close", "volume", "turnover"]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+
+    out = df[cols]
+    print("DEBUG[OTC] normalized rows:", len(out))
+    return out
