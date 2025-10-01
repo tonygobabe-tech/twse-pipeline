@@ -1,72 +1,66 @@
 # reports/market_report.py
+# 合併 TAIEX / OTC 指數 + 三大法人淨買賣，輸出 data/reports/market_overview.csv
 import os
 import pandas as pd
 
-OUT_DIR = os.path.join("data", "reports")
-os.makedirs(OUT_DIR, exist_ok=True)
-OUT_CSV = os.path.join(OUT_DIR, "market_overview.csv")
+BASE_NORM = "data/normalized"
+OUT_DIR = "data/reports"
+OUT_FILE = os.path.join(OUT_DIR, "market_overview.csv")
 
-# 讀取來源（各檔存在則讀）
-paths = {
-    "taiex": os.path.join("data", "normalized", "taiex.csv"),
-    "otc":   os.path.join("data", "normalized", "otc.csv"),
-    "insti": os.path.join("data", "normalized", "insti.csv"),
-}
-dfs = {}
-for k, p in paths.items():
-    dfs[k] = pd.read_csv(p) if os.path.exists(p) and os.path.getsize(p) > 0 else pd.DataFrame()
+def _safe_read_csv(path: str) -> pd.DataFrame:
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        try:
+            return pd.read_csv(path)
+        except Exception as e:
+            print(f"[WARN] failed to read {path}: {e}")
+    return pd.DataFrame()
 
-# 取最新一筆 TAIEX 與 OTC（若空則用 None）
-def latest_one(df: pd.DataFrame, market_name: str):
-    if df.empty:
-        return pd.DataFrame([{
-            "market": market_name, "date": None,
-            "open": None, "high": None, "low": None, "close": None,
-            "volume": None, "turnover": None
-        }])
-    cols = [c for c in ["market","date","open","high","low","close","volume","turnover"] if c in df.columns]
-    d = df.sort_values("date").tail(1)[cols].copy()
-    # 確保 market 欄位
-    if "market" not in d.columns:
-        d["market"] = market_name
-    return d
+def _keep_cols(df: pd.DataFrame, need):
+    cols = [c for c in need if c in df.columns]
+    return df[cols].copy() if cols else pd.DataFrame(columns=need)
 
-taiex_last = latest_one(dfs["taiex"], "TAIEX")
-otc_last   = latest_one(dfs["otc"],   "OTC")
-index_df   = pd.concat([taiex_last, otc_last], ignore_index=True)
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-# 法人近一日合計（若空則補 None）
-if not dfs["insti"].empty and "date" in dfs["insti"].columns:
-    insti_latest_date = dfs["insti"]["date"].max()
-    insti_last = dfs["insti"][dfs["insti"]["date"] == insti_latest_date]
-    agg = {
-        "net_foreign": insti_last["net_foreign"].sum() if "net_foreign" in insti_last else None,
-        "net_invest":  insti_last["net_invest"].sum()  if "net_invest"  in insti_last else None,
-        "net_dealer":  insti_last["net_dealer"].sum()  if "net_dealer"  in insti_last else None,
-        "net_total":   insti_last["net_total"].sum()   if "net_total"   in insti_last else None,
-    }
-else:
-    insti_latest_date = None
-    agg = {"net_foreign": None, "net_invest": None, "net_dealer": None, "net_total": None}
+    taiex = _safe_read_csv(os.path.join(BASE_NORM, "taiex.csv"))
+    otc   = _safe_read_csv(os.path.join(BASE_NORM, "otc.csv"))
+    insti = _safe_read_csv(os.path.join(BASE_NORM, "insti.csv"))
 
-overview = index_df.copy()
-overview["insti_date"] = insti_latest_date
-overview["net_foreign"] = agg["net_foreign"]
-overview["net_invest"]  = agg["net_invest"]
-overview["net_dealer"]  = agg["net_dealer"]
-overview["net_total"]   = agg["net_total"]
+    # 統一欄位：日線常用欄
+    price_cols = ["date", "open", "high", "low", "close", "volume", "turnover"]
 
-# 定義固定欄位順序（就算沒資料也要有表頭）
-cols = [
-    "market","date","open","high","low","close","volume","turnover",
-    "insti_date","net_foreign","net_invest","net_dealer","net_total"
-]
-for c in cols:
-    if c not in overview.columns:
-        overview[c] = None
-overview = overview[cols]
+    frames = []
+    if not taiex.empty:
+        taiex = _keep_cols(taiex, price_cols)
+        taiex["market"] = "TAIEX"
+        frames.append(taiex)
 
-# 寫檔（就算是空資料，也會寫出表頭）
-overview.to_csv(OUT_CSV, index=False)
-print(f"[OK] report -> {OUT_CSV} (rows={len(overview)})")
+    if not otc.empty:
+        otc = _keep_cols(otc, price_cols)
+        otc["market"] = "OTC"
+        frames.append(otc)
 
+    merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=price_cols + ["market"])
+
+    # 三大法人：按日彙總
+    # 欄位: date, net_foreign, net_invest, net_dealer, net_total
+    if not insti.empty and not merged.empty:
+        for c in ["net_foreign","net_invest","net_dealer","net_total"]:
+            if c in insti.columns:
+                insti[c] = pd.to_numeric(insti[c], errors="coerce")
+        insti["date"] = pd.to_datetime(insti["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        g = insti.groupby("date")[["net_foreign","net_invest","net_dealer","net_total"]].sum(min_count=1)
+        g = g.reset_index()
+
+        merged["date"] = pd.to_datetime(merged["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        merged = merged.merge(g, on="date", how="left")
+
+    # 排序、輸出
+    if "date" in merged.columns:
+        merged = merged.sort_values(["date","market"]).reset_index(drop=True)
+
+    merged.to_csv(OUT_FILE, index=False, encoding="utf-8-sig")
+    print(f"[OK] market report -> {OUT_FILE}, rows={len(merged)}")
+
+if __name__ == "__main__":
+    main()
