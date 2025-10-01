@@ -130,31 +130,35 @@ def normalize_insti(raw_json) -> pd.DataFrame:
     return df[out_cols]
 def normalize_taiex(raw_json) -> pd.DataFrame:
     """
-    解析 TWSE MI_INDEX 指數表格，輸出：market, date, open, high, low, close, volume, turnover
+    解析 TWSE MI_INDEX 指數表格，輸出：
+      market, date, open, high, low, close, volume, turnover, is_cached, source_date
     """
-    import pandas as pd
-    tables = raw_json.get("tables") or []
+    import pandas as pd, re
+
+    is_cached = 1 if (isinstance(raw_json, dict) and raw_json.get("_cached")) else 0
+    source_date = (raw_json.get("_cached_from") if isinstance(raw_json, dict) else None)
+
+    # TWSE 回傳多個 tables，找加權指數那張
+    tables = raw_json.get("tables") if isinstance(raw_json, dict) else None
+    if not tables:
+        # 空資料也要回傳 schema，避免後續出錯
+        cols = ["market","date","open","high","low","close","volume","turnover","is_cached","source_date"]
+        return pd.DataFrame(columns=cols)
+
     target = None
     for t in tables:
-        if t.get("title") and ("發行量加權股價指數" in t["title"] or "發行量加權" in t["title"]):
+        if "發行量加權" in (t.get("title") or ""):
             target = t
             break
-
     if not target:
-        print("DEBUG[TAIEX-RAW] keys:", list(raw_json.keys()))
-        print("DEBUG[TAIEX-NORM] parsed rows=0 -> return empty df")
-        return pd.DataFrame(columns=["market","date","open","high","low","close","volume","turnover"])
+        cols = ["market","date","open","high","low","close","volume","turnover","is_cached","source_date"]
+        return pd.DataFrame(columns=cols)
 
     cols = target.get("fields") or []
     rows = target.get("data") or []
-    print(f"DEBUG[TAIEX-RAW] keys={list(raw_json.keys())}")
-    print(f"DEBUG[TAIEX-NORM] cols={cols}")
-    print(f"DEBUG[TAIEX-NORM] rows={len(rows)} sample={rows[:3]}")
-
     df = pd.DataFrame(rows, columns=cols)
 
     def _num(x):
-        import re
         s = str(x).replace(",", "").strip()
         try:
             return float(re.sub(r"[^\d\.\-]", "", s)) if s else None
@@ -169,63 +173,90 @@ def normalize_taiex(raw_json) -> pd.DataFrame:
         elif "收盤" in c or "收市" in c: cmap[c] = "close"
         elif "成交股數" in c or "成交量" in c: cmap[c] = "volume"
         elif "成交金額" in c: cmap[c] = "turnover"
-    df.rename(columns=cmap, inplace=True)
+    df = df.rename(columns=cmap)
 
     for c in ["open","high","low","close","volume","turnover"]:
         if c in df: df[c] = df[c].map(_num)
 
-    date = (raw_json.get("reportDate") or raw_json.get("date") or "").replace("/", "-")[:10]
-    df["date"] = date
-    df["market"] = "TAIEX"
+    date_str = (raw_json.get("reportDate") or raw_json.get("date") or "") if isinstance(raw_json, dict) else ""
+    date_str = date_str.replace("/", "-")[:10] if date_str else None
 
-    print(f"DEBUG[TAIEX-NORM] normalized rows={len(df)}")
-    return df[["market","date","open","high","low","close","volume","turnover"]]
+    df["date"] = date_str
+    df["market"] = "TAIEX"
+    df["is_cached"] = is_cached
+    df["source_date"] = source_date
+
+    out_cols = ["market","date","open","high","low","close","volume","turnover","is_cached","source_date"]
+    return df[out_cols]
+
 
 def normalize_otc(raw_obj) -> pd.DataFrame:
-    import pandas as pd
-    print("DEBUG[OTC-RAW] type=", type(raw_obj))
+    """
+    解析 TPEX 主板指數，輸出：
+      date, open, high, low, close, volume, turnover, is_cached, source_date
+    支援 raw 為 list 或 dict（含 _cached 標記）。
+    """
+    import pandas as pd, re
 
-    if isinstance(raw_obj, dict) and "data" in raw_obj:
-        rows = raw_obj.get("data", [])
-        print(f"DEBUG[OTC-RAW] dict keys={list(raw_obj.keys())}, rows={len(rows)}")
-        df = pd.DataFrame(rows)
+    def _num(x):
+        s = str(x).replace(",", "").strip()
+        try:
+            return float(re.sub(r"[^\d\.\-]", "", s)) if s else None
+        except:
+            return None
+
+    is_cached = 1 if (isinstance(raw_obj, dict) and raw_obj.get("_cached")) else 0
+    source_date = (raw_obj.get("_cached_from") if isinstance(raw_obj, dict) else None)
+
+    # 1) 抽出 rows
+    if isinstance(raw_obj, dict):
+        if "data" in raw_obj and isinstance(raw_obj["data"], list):
+            df = pd.DataFrame(raw_obj["data"])
+        elif "data" in raw_obj and isinstance(raw_obj["data"], dict):
+            df = pd.DataFrame(raw_obj["data"].get("data") or [])
+        else:
+            df = pd.DataFrame()  # 不認得的結構
     elif isinstance(raw_obj, list):
-        print(f"DEBUG[OTC-RAW] list, len={len(raw_obj)} sample={raw_obj[:3]}")
         df = pd.DataFrame(raw_obj)
     else:
-        print("DEBUG[OTC-RAW] unexpected structure -> return empty df")
-        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
+        df = pd.DataFrame()
 
     if df.empty:
-        print("DEBUG[OTC-NORM] df empty -> return empty")
-        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
+        cols = ["date","open","high","low","close","volume","turnover","is_cached","source_date"]
+        return pd.DataFrame(columns=cols)
 
-    print("DEBUG[OTC-NORM] cols:", df.columns.tolist())
-    print("DEBUG[OTC-NORM] sample rows:", df.head(3).to_dict(orient="records"))
-
+    # 2) 找日期欄位並統一欄名
     date_col = None
-    for cand in ["date", "Date", "日期", "time"]:
+    for cand in ["date","Date","tradeDate","日期","time"]:
         if cand in df.columns:
             date_col = cand
             break
-    if not date_col:
-        print("DEBUG[OTC-NORM] no date column -> return empty")
-        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
+    if date_col:
+        df.rename(columns={date_col: "date"}, inplace=True)
+    else:
+        df["date"] = None
 
-    df.rename(columns={
-        date_col: "date",
+    rename_map = {
         "開盤價": "open",
         "最高價": "high",
         "最低價": "low",
         "收盤價": "close",
         "成交股數": "volume",
-        "成交金額": "turnover"
-    }, inplace=True)
+        "成交金額": "turnover",
+    }
+    for k, v in rename_map.items():
+        if k in df.columns:
+            df.rename(columns={k: v}, inplace=True)
 
-    keep_cols = [c for c in ["date","open","high","low","close","volume","turnover"] if c in df.columns]
-    df = df[keep_cols].dropna(how="all")
+    for c in ["open","high","low","close","volume","turnover"]:
+        if c in df.columns:
+            df[c] = df[c].map(_num)
 
-    print(f"DEBUG[OTC-NORM] normalized rows={len(df)}")
+    df["is_cached"] = is_cached
+    df["source_date"] = source_date
+
+    keep = [c for c in ["date","open","high","low","close","volume","turnover","is_cached","source_date"] if c in df.columns]
+    df = df[keep].dropna(how="all")
     return df
 
 
