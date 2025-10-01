@@ -1,61 +1,79 @@
 # reports/to_sql.py
+# 將 data/reports/market_overview.csv 寫入 SQLite: data/twse.db (表: market_overview)
 import os
 import sqlite3
 import pandas as pd
 
-DB_PATH = os.path.join("data", "twse.db")
-CSV_PATH = os.path.join("data", "reports", "market_overview.csv")
-TABLE = "market_overview"
+CSV_PATH = "data/reports/market_overview.csv"
+DB_PATH  = "data/twse.db"
+TABLE    = "market_overview"
 
-SCHEMA_COLS = [
-    ("market", "TEXT"), ("date", "TEXT"),
-    ("open", "REAL"), ("high", "REAL"), ("low", "REAL"), ("close", "REAL"),
-    ("volume", "REAL"), ("turnover", "REAL"),
-    ("insti_date", "TEXT"),
-    ("net_foreign", "REAL"), ("net_invest", "REAL"),
-    ("net_dealer", "REAL"), ("net_total", "REAL"),
-]
+DDL = f"""
+CREATE TABLE IF NOT EXISTS {TABLE} (
+  date TEXT NOT NULL,
+  market TEXT NOT NULL,
+  open REAL,
+  high REAL,
+  low REAL,
+  close REAL,
+  volume REAL,
+  turnover REAL,
+  net_foreign REAL,
+  net_invest REAL,
+  net_dealer REAL,
+  net_total REAL,
+  PRIMARY KEY (date, market)
+);
+"""
 
-def ensure_table(conn):
-    cols_sql = ", ".join([f"{c} {t}" for c,t in SCHEMA_COLS])
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            {cols_sql}
-        )
-    """)
-
-def append_df(conn, df: pd.DataFrame):
-    # 僅保留 schema 定義的欄位
-    keep = [c for c,_ in SCHEMA_COLS]
-    for c in keep:
-        if c not in df.columns: df[c] = None
-    df = df[keep]
-    df.to_sql(TABLE, conn, if_exists="append", index=False)
-    print(f"[OK] appended {len(df)} rows into table {TABLE}")
+INSERT_SQL = f"""
+INSERT OR REPLACE INTO {TABLE}
+(date, market, open, high, low, close, volume, turnover,
+ net_foreign, net_invest, net_dealer, net_total)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+"""
 
 def main():
+    if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
+        print(f"[WARN] CSV not found or empty: {CSV_PATH}")
+        return
+
+    try:
+        df = pd.read_csv(CSV_PATH)
+    except Exception as e:
+        print(f"[ERROR] failed to read {CSV_PATH}: {e}")
+        return
+
+    if df.empty:
+        print("[WARN] market_overview.csv is empty, skip DB write")
+        return
+
+    # 欄位健檢與轉型
+    need_cols = ["date","market","open","high","low","close","volume","turnover",
+                 "net_foreign","net_invest","net_dealer","net_total"]
+    for c in need_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    # 日期/數值型態歸一
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for c in ["open","high","low","close","volume","turnover",
+              "net_foreign","net_invest","net_dealer","net_total"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # 去重（避免重複 append）
+    df = df.drop_duplicates(subset=["date","market"], keep="last")
+
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     try:
-        ensure_table(conn)
+        conn.execute(DDL)
+        conn.commit()
 
-        if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
-            # CSV 不存在或為空檔：仍確保表存在，直接結束
-            print(f"[WARN] CSV not found or empty: {CSV_PATH}. Table ensured, no rows appended.")
-            return
-
-        try:
-            df = pd.read_csv(CSV_PATH)
-        except pd.errors.EmptyDataError:
-            print(f"[WARN] Empty CSV (no header): {CSV_PATH}. Table ensured, no rows appended.")
-            return
-
-        if df.empty:
-            print(f"[WARN] CSV has only header (no rows): {CSV_PATH}. Skipping append.")
-            return
-
-        append_df(conn, df)
+        rows = [tuple(x) for x in df[need_cols].itertuples(index=False, name=None)]
+        conn.executemany(INSERT_SQL, rows)
+        conn.commit()
+        print(f"[OK] upserted {len(rows)} rows into {DB_PATH}#{TABLE}")
     finally:
         conn.close()
 
