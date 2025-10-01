@@ -1,8 +1,9 @@
 name: TWSE Pipeline
+
 on:
   schedule:
-    - cron: "5 10 * * *"   # UTC 10:05 = 台北 18:05，每日自動跑
-  workflow_dispatch: {}     # 允許手動觸發
+    - cron: "5 10 * * *"     # UTC 10:05 = 台北 18:05
+  workflow_dispatch: {}
 
 jobs:
   run:
@@ -14,26 +15,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Fetch & normalize datasets
-        run: python main.py fetch daily news insti taiex otc
+      # 抓資料 + 正規化（你現有的流程）
+      - run: python main.py fetch daily news insti taiex otc
 
-      # 👉 新增：產出合併後的大盤+法人報表
-      - name: Generate market report
-        run: python reports/market_report.py
+      # 產「大盤 + 法人」報表（新增）
+      - run: python reports/market_report.py
 
-      # 👉 新增：把報表 append 到 SQLite (twse.db) 的 market_overview 表
-      - name: Save report to SQLite
-        run: python reports/to_sql.py
+      # 報表寫進 SQLite（新增）
+      - run: python reports/to_sql.py
 
-      # 依需求上傳成果（含 data/、報表與 DB）
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      # 打包輸出整個 data 目錄（含 CSV、SQLite）
+      - uses: actions/upload-artifact@v4
         with:
           name: data
-          path: |
-            data
-            reports/market_overview.csv
-            twse.db
+          path: data
