@@ -1,66 +1,114 @@
 # reports/market_report.py
-# 合併 TAIEX / OTC 指數 + 三大法人淨買賣，輸出 data/reports/market_overview.csv
+# 產出「大盤 + 全市場合計法人流向」的報表
+# 輸出：data/reports/market_overview.csv
+#
+# 欄位：
+# date, market, open, high, low, close, volume, turnover,
+# net_foreign, net_invest, net_dealer, net_total
+#
+# 備註：
+# - 法人流向為「全市場合計」（當天 T86 全部股票加總），同一日期會併到 TAIEX/OTC 兩筆
+# - 之後若要市值加權或分 TWSE/OTC，我們再升級邏輯即可
+
 import os
 import pandas as pd
 
-BASE_NORM = "data/normalized"
-OUT_DIR = "data/reports"
-OUT_FILE = os.path.join(OUT_DIR, "market_overview.csv")
+BASE = "data"
+NORM = os.path.join(BASE, "normalized")
+REPORT_DIR = os.path.join(BASE, "reports")
+os.makedirs(REPORT_DIR, exist_ok=True)
 
-def _safe_read_csv(path: str) -> pd.DataFrame:
-    if os.path.exists(path) and os.path.getsize(path) > 0:
-        try:
+def _read_csv(path: str) -> pd.DataFrame:
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
             return pd.read_csv(path)
-        except Exception as e:
-            print(f"[WARN] failed to read {path}: {e}")
+    except Exception:
+        pass
     return pd.DataFrame()
 
-def _keep_cols(df: pd.DataFrame, need):
-    cols = [c for c in need if c in df.columns]
-    return df[cols].copy() if cols else pd.DataFrame(columns=need)
+def _ensure_cols(df: pd.DataFrame, cols):
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    return df
 
-def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+def build_market_overview():
+    # 1) 讀兩個指數
+    taiex = _read_csv(os.path.join(NORM, "taiex.csv"))
+    otc   = _read_csv(os.path.join(NORM, "otc.csv"))
 
-    taiex = _safe_read_csv(os.path.join(BASE_NORM, "taiex.csv"))
-    otc   = _safe_read_csv(os.path.join(BASE_NORM, "otc.csv"))
-    insti = _safe_read_csv(os.path.join(BASE_NORM, "insti.csv"))
-
-    # 統一欄位：日線常用欄
-    price_cols = ["date", "open", "high", "low", "close", "volume", "turnover"]
-
+    # 只保留共用欄位並標 market
+    keep = ["date","open","high","low","close","volume","turnover"]
     frames = []
+
     if not taiex.empty:
-        taiex = _keep_cols(taiex, price_cols)
+        taiex = _ensure_cols(taiex, keep)[keep].copy()
         taiex["market"] = "TAIEX"
         frames.append(taiex)
 
     if not otc.empty:
-        otc = _keep_cols(otc, price_cols)
+        otc = _ensure_cols(otc, keep)[keep].copy()
         otc["market"] = "OTC"
         frames.append(otc)
 
-    merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=price_cols + ["market"])
+    if frames:
+        idx = pd.concat(frames, ignore_index=True)
+    else:
+        # 沒有任何指數資料 → 仍輸出空殼報表
+        cols = keep + ["market","net_foreign","net_invest","net_dealer","net_total"]
+        out = pd.DataFrame(columns=cols)
+        out.to_csv(os.path.join(REPORT_DIR, "market_overview.csv"), index=False, encoding="utf-8-sig")
+        print("[OK] market_overview.csv -> empty (no index rows)")
+        return
 
-    # 三大法人：按日彙總
-    # 欄位: date, net_foreign, net_invest, net_dealer, net_total
-    if not insti.empty and not merged.empty:
-        for c in ["net_foreign","net_invest","net_dealer","net_total"]:
-            if c in insti.columns:
-                insti[c] = pd.to_numeric(insti[c], errors="coerce")
-        insti["date"] = pd.to_datetime(insti["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        g = insti.groupby("date")[["net_foreign","net_invest","net_dealer","net_total"]].sum(min_count=1)
-        g = g.reset_index()
+    # 2) 讀三大法人（T86）並作「全市場合計」
+    insti = _read_csv(os.path.join(NORM, "insti.csv"))
+    flow_cols = ["net_foreign","net_invest","net_dealer","net_total"]
 
-        merged["date"] = pd.to_datetime(merged["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        merged = merged.merge(g, on="date", how="left")
+    if not insti.empty:
+        for c in flow_cols + ["date"]:
+            if c not in insti.columns:
+                insti[c] = 0 if c in flow_cols else None
 
-    # 排序、輸出
-    if "date" in merged.columns:
-        merged = merged.sort_values(["date","market"]).reset_index(drop=True)
+        # 嘗試把法人數字轉成 int（若為空或格式亂則當 0）
+        def _to_int(x):
+            try:
+                s = str(x).replace(",", "").strip()
+                return int(float(s)) if s not in ("", "—", "None", "nan") else 0
+            except Exception:
+                return 0
 
-    merged.to_csv(OUT_FILE, index=False, encoding="utf-8-sig")
-    print(f"[OK] market report -> {OUT_FILE}, rows={len(merged)}")
+        for c in flow_cols:
+            insti[c] = insti[c].map(_to_int)
+
+        # 以日期加總（全市場合計）
+        flows = (
+            insti.groupby("date", dropna=True)[flow_cols]
+                 .sum(min_count=1)  # all-NaN -> NaN
+                 .reset_index()
+        )
+    else:
+        flows = pd.DataFrame(columns=["date"] + flow_cols)
+
+    # 3) 依日期合併（全市場合計 → 同一天併到兩筆 market）
+    out = idx.merge(flows, on="date", how="left")
+
+    # 若法人欄位缺 → 補 0，避免空值影響 downstream
+    for c in flow_cols:
+        if c not in out.columns:
+            out[c] = 0
+        out[c] = out[c].fillna(0).astype(int)
+
+    # 排序：日期新到舊、再以 market 排（TAIEX 在前）
+    market_order = {"TAIEX": 0, "OTC": 1}
+    out["_m"] = out["market"].map(market_order).fillna(9)
+    out = out.sort_values(by=["date", "_m"], ascending=[False, True]).drop(columns=["_m"])
+
+    # 4) 輸出
+    out_path = os.path.join(REPORT_DIR, "market_overview.csv")
+    out.to_csv(out_path, index=False, encoding="utf-8-sig")
+
+    print(f"[OK] market_overview.csv rows={len(out)} -> {out_path}")
 
 if __name__ == "__main__":
-    main()
+    build_market_overview()
