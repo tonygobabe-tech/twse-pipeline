@@ -9,12 +9,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python main.py fetch daily news insti taiex otc
-      - uses: actions/upload-artifact@v4
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch & normalize datasets
+        run: python main.py fetch daily news insti taiex otc
+
+      # 👉 新增：產出合併後的大盤+法人報表
+      - name: Generate market report
+        run: python reports/market_report.py
+
+      # 👉 新增：把報表 append 到 SQLite (twse.db) 的 market_overview 表
+      - name: Save report to SQLite
+        run: python reports/to_sql.py
+
+      # 依需求上傳成果（含 data/、報表與 DB）
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: data
-          path: data
+          path: |
+            data
+            reports/market_overview.csv
+            twse.db
