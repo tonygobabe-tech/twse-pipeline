@@ -130,101 +130,218 @@ def normalize_insti(raw_json) -> pd.DataFrame:
     return df[out_cols]
 def normalize_taiex(raw_json) -> pd.DataFrame:
     """
-    解析 TWSE MI_INDEX 指數表格，輸出：market, date, open, high, low, close, volume, turnover
+    解析 TWSE MI_INDEX 指數表格，統一輸出：
+    ['market','date','open','high','low','close','volume','turnover']
+    會印出原始 keys / sample 以利除錯。
     """
     import pandas as pd
-    # TWSE 回傳多個 tables，找加權指數那張
-    tables = raw_json.get("tables") or []
-    target = None
-    for t in tables:
-        if t.get("title") and ("發行量加權股價指數" in t["title"] or "發行量加權" in t["title"]):
-            target = t
-            break
-    if not target:
+    import re
+    from datetime import datetime
+
+    def _num2(x):
+        # 用你檔案上方的 _to_num 規則，但容許百分比/字尾
+        s = str(x).strip().replace(",", "")
+        s = re.sub(r"[^\d\.\-]", "", s)
+        try:
+            return float(s) if s else None
+        except:
+            return None
+
+    def _date_any(s):
+        if s is None:
+            return None
+        s = str(s).strip()
+        # 民國年 112/09/30
+        m = re.match(r"^(\d{2,3})[/-](\d{1,2})[/-](\d{1,2})$", s)
+        if m and int(m.group(1)) < 1911:
+            try:
+                y = int(m.group(1)) + 1911
+                return f"{y:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+            except:
+                pass
+        for fmt in ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except:
+                continue
+        return s  # 先保留原樣
+
+    # ---- DEBUG：原始結構 ----
+    if isinstance(raw_json, dict):
+        print("DEBUG[TAIEX-RAW] keys:", list(raw_json.keys()))
+        if "tables" in raw_json and isinstance(raw_json["tables"], list) and raw_json["tables"]:
+            t0 = raw_json["tables"][0]
+            print("DEBUG[TAIEX-RAW] tables[0] keys:", list(t0.keys()))
+            d0 = (t0.get("data") or t0.get("rows") or [])
+            if isinstance(d0, list) and d0:
+                print("DEBUG[TAIEX-RAW] tables[0].data[0]:", d0[0])
+    else:
+        print("DEBUG[TAIEX-RAW] type:", type(raw_json))
+
+    rows = []
+
+    try:
+        if isinstance(raw_json, dict):
+            tables = raw_json.get("tables") or []
+            target = None
+            for t in tables:
+                title = str(t.get("title") or t.get("name") or "")
+                if ("發行量加權" in title) or ("加權指數" in title):
+                    target = t
+                    break
+
+            if target:
+                # 可能是 columns + data，也可能只有 data（list 或 list[dict]）
+                cols = target.get("fields") or target.get("columns") or []
+                data = target.get("data") or target.get("rows") or []
+
+                if cols and isinstance(data, list) and data and isinstance(data[0], (list, tuple)):
+                    # 形式：fields + data(row = list)
+                    df = pd.DataFrame(data, columns=cols)
+                else:
+                    # 形式：data 為 list[dict] 或其他寬鬆型
+                    df = pd.DataFrame(data)
+
+                # DEBUG 欄位檢視
+                print("DEBUG[TAIEX-NORM] cand columns:", df.columns.tolist()[:20])
+
+                # 嘗試欄位映射（中文/英文）
+                cmap = {}
+                for c in df.columns:
+                    cs = str(c)
+                    if any(k in cs for k in ["開盤", "open", "Open"]):        cmap[c] = "open"
+                    elif any(k in cs for k in ["最高", "high", "High"]):      cmap[c] = "high"
+                    elif any(k in cs for k in ["最低", "low", "Low"]):        cmap[c] = "low"
+                    elif any(k in cs for k in ["收盤", "收市", "close", "Close", "Index"]): cmap[c] = "close"
+                    elif any(k in cs for k in ["成交量", "成交股數", "Volume"]): cmap[c] = "volume"
+                    elif any(k in cs for k in ["成交金額", "Turnover", "Value"]): cmap[c] = "turnover"
+                    elif any(k in cs for k in ["日期", "date", "Date", "time"]): cmap[c] = "date"
+
+                if cmap:
+                    df = df.rename(columns=cmap)
+
+                # 如果沒有 date 欄，嘗試從報表日期或 raw_json 頭階資訊拿
+                if "date" not in df.columns:
+                    rpt_date = (raw_json.get("reportDate") or raw_json.get("date") or "").replace("/", "-")[:10]
+                    df["date"] = rpt_date
+
+                # 數字清洗
+                for c in ["open", "high", "low", "close", "volume", "turnover"]:
+                    if c in df.columns:
+                        df[c] = df[c].map(_num2)
+
+                # 日期轉換
+                df["date"] = df["date"].map(_date_any)
+
+                # 固定欄位
+                for c in ["open","high","low","close","volume","turnover"]:
+                    if c not in df.columns: df[c] = None
+                df["market"] = "TAIEX"
+                df = df[["market","date","open","high","low","close","volume","turnover"]]
+                df = df.dropna(how="all")
+                print("DEBUG[TAIEX-NORM] rows:", len(df))
+                return df
+    except Exception as e:
+        print("DEBUG[TAIEX-NORM] exception:", repr(e))
+
+    # 全部失敗 → 回空但欄位正確
+    print("DEBUG[TAIEX-NORM] parsed rows=0 -> return empty df")
+    return pd.DataFrame(columns=["market","date","open","high","low","close","volume","turnover"])
+
+def normalize_otc(raw_obj) -> pd.DataFrame:
+    """
+    解析 TPEX 櫃買指數，統一輸出：
+    ['market','date','open','high','low','close','volume','turnover']
+    加入原始 keys / sample debug、寬鬆欄位對應、數字/日期清洗。
+    """
+    import pandas as pd
+    import re
+    from datetime import datetime
+
+    def _num2(x):
+        s = str(x).strip().replace(",", "")
+        s = re.sub(r"[^\d\.\-]", "", s)
+        try:
+            return float(s) if s else None
+        except:
+            return None
+
+    def _date_any(s):
+        if s is None:
+            return None
+        s = str(s).strip()
+        m = re.match(r"^(\d{2,3})[/-](\d{1,2})[/-](\d{1,2})$", s)
+        if m and int(m.group(1)) < 1911:
+            try:
+                y = int(m.group(1)) + 1911
+                return f"{y:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+            except:
+                pass
+        for fmt in ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except:
+                continue
+        return s
+
+    # ---- DEBUG 原始結構 ----
+    if isinstance(raw_obj, list):
+        print("DEBUG[OTC-RAW] type=list, len:", len(raw_obj))
+        if raw_obj[:1]:
+            print("DEBUG[OTC-RAW] first keys:", list(raw_obj[0].keys()))
+            print("DEBUG[OTC-RAW] first item:", raw_obj[0])
+    elif isinstance(raw_obj, dict):
+        print("DEBUG[OTC-RAW] type=dict keys:", list(raw_obj.keys()))
+    else:
+        print("DEBUG[OTC-RAW] type:", type(raw_obj))
+
+    # 支援 list[dict] / dict{data:list}
+    if isinstance(raw_obj, dict) and "data" in raw_obj:
+        df = pd.DataFrame(raw_obj.get("data") or [])
+    elif isinstance(raw_obj, list):
+        df = pd.DataFrame(raw_obj)
+    else:
+        print("DEBUG[OTC-NORM] unexpected raw -> empty")
         return pd.DataFrame(columns=["market","date","open","high","low","close","volume","turnover"])
 
-    cols = target.get("fields") or []
-    rows = target.get("data") or []
-    df = pd.DataFrame(rows, columns=cols)
+    if df.empty:
+        print("DEBUG[OTC-NORM] df empty -> return empty")
+        return pd.DataFrame(columns=["market","date","open","high","low","close","volume","turnover"])
 
-    def _num(x):
-        import re
-        s = str(x).replace(",", "").strip()
-        try:
-            return float(re.sub(r"[^\d\.\-]", "", s)) if s else None
-        except: return None
+    print("DEBUG[OTC-NORM] cand columns:", df.columns.tolist()[:20])
 
-    # 嘗試常見中文欄位
+    # 欄位對應（盡量寬鬆）
     cmap = {}
     for c in df.columns:
-        if "開盤" in c: cmap[c] = "open"
-        elif "最高" in c: cmap[c] = "high"
-        elif "最低" in c: cmap[c] = "low"
-        elif "收盤" in c or "收市" in c: cmap[c] = "close"
-        elif "成交股數" in c or "成交量" in c: cmap[c] = "volume"
-        elif "成交金額" in c: cmap[c] = "turnover"
-    df = df.rename(columns=cmap)
+        cs = str(c)
+        if cs in ["date","Date","日期","time"]:              cmap[c] = "date"
+        elif any(k in cs for k in ["open","OpeningIndex","開盤"]):  cmap[c] = "open"
+        elif any(k in cs for k in ["high","最高"]):                 cmap[c] = "high"
+        elif any(k in cs for k in ["low","最低"]):                  cmap[c] = "low"
+        elif any(k in cs for k in ["close","ClosingIndex","收盤","index"]): cmap[c] = "close"
+        elif any(k in cs for k in ["volume","Volume","成交量","tradeVolume"]): cmap[c] = "volume"
+        elif any(k in cs for k in ["turnover","TradeValue","成交金額","tradeValue"]): cmap[c] = "turnover"
+    if cmap:
+        df = df.rename(columns=cmap)
+
+    # 數字/日期清洗
     for c in ["open","high","low","close","volume","turnover"]:
-        if c in df: df[c] = df[c].map(_num)
-
-    date = (raw_json.get("reportDate") or raw_json.get("date") or "").replace("/", "-")[:10]
-    df["date"] = date
-    df["market"] = "TAIEX"
-    return df[["market","date","open","high","low","close","volume","turnover"]]
-
-def normalize_otc(raw_obj):
-    import pandas as pd
-    
-    print("DEBUG[OTC] raw_obj:", type(raw_obj), len(raw_obj))
-    
-    # Case 1: 如果 raw_obj 直接是 dict 包含 'data' 欄位
-    if isinstance(raw_obj, dict) and "data" in raw_obj:
-        rows = raw_obj.get("data", [])
-        print("DEBUG[OTC] dict with 'data', rows:", len(rows))
-        df = pd.DataFrame(rows)
-    
-    # Case 2: 如果 raw_obj 是 list（常見情況）
-    elif isinstance(raw_obj, list):
-        print("DEBUG[OTC] list detected, rows:", len(raw_obj))
-        df = pd.DataFrame(raw_obj)
-    
+        if c in df.columns:
+            df[c] = df[c].map(_num2)
+    if "date" in df.columns:
+        df["date"] = df["date"].map(_date_any)
     else:
-        print("DEBUG[OTC] unexpected structure:", raw_obj)
-        return pd.DataFrame()  # 空表回傳
+        print("DEBUG[OTC-NORM] no 'date' column -> fill NA")
+        df["date"] = None
 
-    print("DEBUG[OTC] columns:", df.columns.tolist())
-    print("DEBUG[OTC] sample rows:", df.head(3).to_dict(orient="records"))
+    for c in ["open","high","low","close","volume","turnover"]:
+        if c not in df.columns: df[c] = None
 
-    # 如果 df 真的沒有東西，直接回空
-    if df.empty:
-        print("DEBUG[OTC] df is empty, return blank DataFrame")
-        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
+    df["market"] = "OTC"
+    df = df[["market","date","open","high","low","close","volume","turnover"]]
+    df = df.dropna(how="all")
 
-    # 嘗試找日期欄位（有些 API 用 "Date" 或 "date"）
-    date_col = None
-    for cand in ["date", "Date", "日期", "time"]:
-        if cand in df.columns:
-            date_col = cand
-            break
-    if not date_col:
-        print("DEBUG[OTC] no date column found!")
-        return pd.DataFrame(columns=["date","open","high","low","close","volume","turnover"])
-
-    # 統一欄位
-    df = df.rename(columns={
-        date_col: "date",
-        "開盤價": "open",
-        "最高價": "high",
-        "最低價": "low",
-        "收盤價": "close",
-        "成交股數": "volume",
-        "成交金額": "turnover"
-    })
-
-    keep_cols = ["date","open","high","low","close","volume","turnover"]
-    keep_cols = [c for c in keep_cols if c in df.columns]
-    df = df[keep_cols].dropna(how="all")
-
-    print("DEBUG[OTC] normalized rows:", len(df))
+    print("DEBUG[OTC-NORM] rows:", len(df), "cols:", list(df.columns))
     return df
+
 
