@@ -1,19 +1,21 @@
-# index_fetch.py — 指數抓取（TAIEX/OTC）強韌回推版
+# index_fetch.py — 指數抓取（TAIEX/OTC）強韌回推版（max_backtrack=10＋強化 Log）
 # 特點：
-# - 以台北時間判斷；<16:00 預設抓前一日
+# - 以台北時間判斷；<16:00 預設抓前一個交易日
 # - 自動跳過週末
-# - 先抓「指定日」；失敗則回推前幾天（預設最多 5 天）
+# - 先抓「指定日」；失敗則回推前幾天（預設最多 10 天，應付長假）
 # - OTC 另加「全量端點 + 多日期格式」過濾
-# - 永遠落地 raw 檔（就算是 []），避免後續流程中斷
+# - 永遠落地 raw 檔（就算是空檔），避免後續流程中斷
 # - Log 一致：DEBUG[...] 每次嘗試；INFO[...] 超過回推上限
 
 from utils import HttpClient, save_json
 from datetime import datetime, timedelta, timezone
-import os, json, requests
+import os
+import json
+import requests
 
 
 # ---------- 共用工具 ----------
-def _tz_now_tw():
+def _tz_now_tw() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=8)
 
 def _yyyymmdd(dt: datetime) -> str:
@@ -40,7 +42,7 @@ def fetch_taiex(
     client: HttpClient,
     out_root: str,
     date_yyyymmdd: str | None = None,
-    max_backtrack: int = 5,
+    max_backtrack: int = 10,   # ← 調整為 10 天
 ):
     """
     TWSE MI_INDEX (type=IND)
@@ -77,7 +79,7 @@ def fetch_taiex(
 
         path = os.path.join(raw_dir, f"taiex_{ymd}.json")
         save_json(data or {}, path)
-        print(f"DEBUG[TAIEX] try={tried}, date={ymd}, ok={ok}")
+        print(f"DEBUG[TAIEX] try={tried:>2}, date={ymd}, ok={ok}")
 
         if ok:
             return path, ymd
@@ -97,7 +99,7 @@ def fetch_otc(
     client: HttpClient,
     out_root: str,
     date_yyyymmdd: str | None = None,
-    max_backtrack: int = 5,
+    max_backtrack: int = 10,   # ← 調整為 10 天
 ):
     """
     TPEX openapi：先打帶 date 端點，若空再打不帶日期的全量端點並以多種日期格式過濾。
@@ -161,7 +163,7 @@ def fetch_otc(
 
         path = os.path.join(raw_dir, f"otc_{ymd}.json")
         save_json(data or [], path)
-        print(f"DEBUG[OTC] try={tried}, date={ymd}, rows={len(data or [])}")
+        print(f"DEBUG[OTC]   try={tried:>2}, date={ymd}, rows={len(data or [])}")
 
         if data:  # 有資料就停
             return path, ymd
