@@ -2,40 +2,42 @@ name: TWSE Pipeline
 
 on:
   schedule:
-    - cron: "5 10 * * *"   # UTC 10:05 = 台北 18:05，每日自動跑
-  workflow_dispatch: {}     # 允許手動觸發
+    # 每日台北 18:05 執行（UTC 10:05）
+    - cron: "5 10 * * *"
+  workflow_dispatch: {}  # 允許手動觸發
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      # 1) 取 repo
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3) 安裝依賴
       - name: Install deps
         run: pip install -r requirements.txt
 
-      # === 抓原始資料並正規化 ===
+      # 4) 抓資料：daily / news / insti / taiex / otc
       - name: Fetch datasets
         run: python main.py fetch daily news insti taiex otc
 
-      # === 產報表（大盤 + 法人欄位） ===
+      # 5) 產報表：合併大盤 + 三大法人
       - name: Build market report (merge taiex/otc + T86)
         run: python reports/market_report.py
 
-      # === 立即回填（用既有 normalized taiex/otc 先塞 DB） ===
-      - name: Backfill market_overview from normalized CSV (optional)
-        run: python reports/backfill_from_normalized.py
-
-      # === 寫進 SQLite（market_overview 表；安全處理空檔） ===
-      - name: Save report to SQLite
-        run: python reports/to_sql.py
-
-      # === 上傳成品 ===
-      - uses: actions/upload-artifact@v4
+      # 6) 上傳 artifacts：整個 data/ 與 twse.db
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: data
-          path: data
+          path: |
+            data
+            twse.db
