@@ -33,7 +33,7 @@ watchlist:
   - "2330"   # 台積電
   - "0050"   # 元大台灣50
 output_dir: "data"
-storage: "csv"  # csv 或 sqlite
+storage: "sqlite"  # storage 的值目前不影響輸出格式，程式固定同時輸出 SQLite 與 CSV。
 ```
 
 ### 3) 一鍵抓取
@@ -55,6 +55,7 @@ python main.py fetch holders # t187ap14_L
 - `data/raw/*.json`：原始 API 回傳（保留觀測）
 - `data/normalized/*.csv`：清洗後標準欄位
 - `data/watchlist/*.csv`：僅保留 watchlist 之標的
+- `data/twse.db`：清洗後資料的 SQLite 資料庫
 
 ---
 
@@ -112,12 +113,14 @@ jobs:
 
 ---
 
-## 進階：改用 SQLite 儲存
+## 進階：SQLite 與 CSV 同時儲存
 在 `config.yaml` 設定：
 ```yaml
 storage: "sqlite"
 ```
-輸出會寫入 `data/twse.db`，每個資料集對應一張表（`daily`, `monthly`, `yearly`, `basics`, `news`, `holders`）。
+目前 `storage` 設定不會切換儲存格式；程式固定同時輸出：
+- `data/twse.db`：每個資料集對應一張表（`daily`, `monthly`, `yearly`, `basics`, `news`, `holders` 等）。
+- `data/normalized/*.csv`：各資料集的清洗後 CSV。
 
 ---
 
