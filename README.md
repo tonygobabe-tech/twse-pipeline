@@ -117,7 +117,7 @@ jobs:
 ```yaml
 storage: "sqlite"
 ```
-輸出會寫入 `data/twse.db`，每個資料集對應一張表（`daily`, `monthly`, `yearly`, `basics`, `news`, `holders`）。
+設定為 `sqlite` 後，程式只會輸出 `data/twse.db`，不會再產生任何 `data/normalized/*.csv` 檔案。
 
 ---
 
